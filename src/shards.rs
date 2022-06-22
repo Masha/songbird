@@ -47,12 +47,12 @@ pub enum Sharder {
 #[async_trait]
 pub trait GenericSharder {
     /// Get access to a new shard
-    fn get_shard(&self, shard_id: u64) -> Option<Arc<dyn VoiceUpdate + Send + Sync>>;
+    fn get_shard(&self, shard_id: u32) -> Option<Arc<dyn VoiceUpdate + Send + Sync>>;
 }
 
 impl Sharder {
     /// Returns a new handle to the required inner shard.
-    pub fn get_shard(&self, shard_id: u64) -> Option<Shard> {
+    pub fn get_shard(&self, shard_id: u32) -> Option<Shard> {
         match self {
             #[cfg(feature = "serenity")]
             Sharder::Serenity(s) => Some(Shard::Serenity(s.get_or_insert_shard_handle(shard_id))),
@@ -68,18 +68,20 @@ impl Sharder {
 #[cfg(feature = "serenity")]
 impl Sharder {
     #[allow(unreachable_patterns)]
-    pub(crate) fn register_shard_handle(&self, shard_id: u64, sender: Sender<InterMessage>) {
-        match self {
-            Sharder::Serenity(s) => s.register_shard_handle(shard_id, sender),
-            _ => error!("Called serenity management function on a non-serenity Songbird instance."),
+    pub(crate) fn register_shard_handle(&self, shard_id: u32, sender: Sender<InterMessage>) {
+        if let Sharder::Serenity(s) = self {
+            s.register_shard_handle(shard_id, sender);
+        } else {
+            error!("Called serenity management function on a non-serenity Songbird instance.");
         }
     }
 
     #[allow(unreachable_patterns)]
-    pub(crate) fn deregister_shard_handle(&self, shard_id: u64) {
-        match self {
-            Sharder::Serenity(s) => s.deregister_shard_handle(shard_id),
-            _ => error!("Called serenity management function on a non-serenity Songbird instance."),
+    pub(crate) fn deregister_shard_handle(&self, shard_id: u32) {
+        if let Sharder::Serenity(s) = self {
+            s.deregister_shard_handle(shard_id);
+        } else {
+            error!("Called serenity management function on a non-serenity Songbird instance.");
         }
     }
 }
@@ -90,11 +92,11 @@ impl Sharder {
 ///
 /// This is updated and maintained by the library, and is designed to prevent
 /// message loss during rebalances and reconnects.
-pub struct SerenitySharder(PRwLock<HashMap<u64, Arc<SerenityShardHandle>>>);
+pub struct SerenitySharder(PRwLock<HashMap<u32, Arc<SerenityShardHandle>>>);
 
 #[cfg(feature = "serenity")]
 impl SerenitySharder {
-    fn get_or_insert_shard_handle(&self, shard_id: u64) -> Arc<SerenityShardHandle> {
+    fn get_or_insert_shard_handle(&self, shard_id: u32) -> Arc<SerenityShardHandle> {
         ({
             let map_read = self.0.read();
             map_read.get(&shard_id).cloned()
@@ -105,14 +107,14 @@ impl SerenitySharder {
         })
     }
 
-    fn register_shard_handle(&self, shard_id: u64, sender: Sender<InterMessage>) {
+    fn register_shard_handle(&self, shard_id: u32, sender: Sender<InterMessage>) {
         // Write locks are only used to add new entries to the map.
         let handle = self.get_or_insert_shard_handle(shard_id);
 
         handle.register(sender);
     }
 
-    fn deregister_shard_handle(&self, shard_id: u64) {
+    fn deregister_shard_handle(&self, shard_id: u32) {
         // Write locks are only used to add new entries to the map.
         let handle = self.get_or_insert_shard_handle(shard_id);
 
@@ -130,7 +132,7 @@ pub enum Shard {
     Serenity(Arc<SerenityShardHandle>),
     #[cfg(feature = "twilight")]
     /// Handle to a twilight shard spawned from a cluster.
-    TwilightCluster(Arc<Cluster>, u64),
+    TwilightCluster(Arc<Cluster>, u32),
     #[cfg(feature = "twilight")]
     /// Handle to a twilight shard spawned from a cluster.
     TwilightShard(Arc<TwilightShard>),
@@ -188,9 +190,9 @@ impl VoiceUpdate for Shard {
             },
             #[cfg(feature = "twilight")]
             Shard::TwilightCluster(handle, shard_id) => {
-                let channel_id = nz_channel_id.map(From::from);
-                let cmd = TwilightVoiceState::new(nz_guild_id, channel_id, self_deaf, self_mute);
-                handle.command(*shard_id, &cmd).await?;
+                let channel_id = channel_id.map(|c| c.0).map(From::from);
+                let cmd = TwilightVoiceState::new(guild_id.0, channel_id, self_deaf, self_mute);
+                handle.command(*shard_id as u64, &cmd).await?;
                 Ok(())
             },
             #[cfg(feature = "twilight")]
