@@ -1,3 +1,5 @@
+#[cfg(feature = "serenity")]
+use crate::shards::SerenitySharder;
 use crate::{
     error::{JoinError, JoinResult},
     id::{ChannelId, GuildId, UserId},
@@ -22,20 +24,16 @@ use serenity::{
     },
 };
 use std::sync::Arc;
-#[cfg(not(feature = "tokio-02-marker"))]
 use tokio::sync::Mutex;
-#[cfg(feature = "tokio-02-marker")]
-use tokio_compat::sync::Mutex;
 use tracing::debug;
 #[cfg(feature = "twilight")]
 use twilight_gateway::Cluster;
 #[cfg(feature = "twilight")]
 use twilight_model::gateway::event::Event as TwilightEvent;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 struct ClientData {
-    shard_count: u64,
-    initialised: bool,
+    shard_count: u32,
     user_id: UserId,
 }
 
@@ -47,7 +45,7 @@ struct ClientData {
 /// [`Call`]: Call
 #[derive(Debug)]
 pub struct Songbird {
-    client_data: PRwLock<ClientData>,
+    client_data: PRwLock<Option<ClientData>>,
     calls: DashMap<GuildId, Arc<Mutex<Call>>>,
     sharder: Sharder,
     config: PRwLock<Option<Config>>,
@@ -60,8 +58,9 @@ impl Songbird {
     /// This must be [registered] after creation.
     ///
     /// [registered]: crate::serenity::register_with
+    #[must_use]
     pub fn serenity() -> Arc<Self> {
-        Self::serenity_from_config(Default::default())
+        Self::serenity_from_config(Config::default())
     }
 
     #[cfg(feature = "serenity")]
@@ -70,11 +69,12 @@ impl Songbird {
     /// This must be [registered] after creation.
     ///
     /// [registered]: crate::serenity::register_with
+    #[must_use]
     pub fn serenity_from_config(config: Config) -> Arc<Self> {
         Arc::new(Self {
-            client_data: Default::default(),
-            calls: Default::default(),
-            sharder: Sharder::Serenity(Default::default()),
+            client_data: PRwLock::new(None),
+            calls: DashMap::new(),
+            sharder: Sharder::Serenity(SerenitySharder::default()),
             config: Some(config).into(),
         })
     }
@@ -87,11 +87,11 @@ impl Songbird {
     /// [`process`].
     ///
     /// [`process`]: Songbird::process
-    pub fn twilight<U>(cluster: Cluster, user_id: U) -> Self
+    pub fn twilight<U>(cluster: Arc<Cluster>, user_id: U) -> Self
     where
         U: Into<UserId>,
     {
-        Self::twilight_from_config(cluster, user_id, Default::default())
+        Self::twilight_from_config(cluster, user_id, Config::default())
     }
 
     #[cfg(feature = "twilight")]
@@ -102,22 +102,17 @@ impl Songbird {
     /// [`process`].
     ///
     /// [`process`]: Songbird::process
-    pub fn twilight_from_config<U>(cluster: Cluster, user_id: U, config: Config) -> Self
+    pub fn twilight_from_config<U>(cluster: Arc<Cluster>, user_id: U, config: Config) -> Self
     where
         U: Into<UserId>,
     {
         Self {
-            client_data: PRwLock::new(ClientData {
-                shard_count: cluster
-                    .config()
-                    .shard_scheme()
-                    .total()
-                    .unwrap_or_else(|| cluster.shards().len() as u64),
-                initialised: true,
+            client_data: PRwLock::new(Some(ClientData {
+                shard_count: cluster.config().shard_scheme().total() as u32,
                 user_id: user_id.into(),
-            }),
-            calls: Default::default(),
-            sharder: Sharder::Twilight(cluster),
+            })),
+            calls: DashMap::new(),
+            sharder: Sharder::TwilightCluster(cluster),
             config: Some(config).into(),
         }
     }
@@ -128,16 +123,17 @@ impl Songbird {
     /// or a previous call, then this function is a no-op.
     ///
     /// [`::twilight`]: #method.twilight
-    pub fn initialise_client_data<U: Into<UserId>>(&self, shard_count: u64, user_id: U) {
+    pub fn initialise_client_data<U: Into<UserId>>(&self, shard_count: u32, user_id: U) {
         let mut client_data = self.client_data.write();
 
-        if client_data.initialised {
+        if client_data.is_some() {
             return;
         }
 
-        client_data.shard_count = shard_count;
-        client_data.user_id = user_id.into();
-        client_data.initialised = true;
+        *client_data = Some(ClientData {
+            shard_count,
+            user_id: user_id.into(),
+        });
     }
 
     /// Retrieves a [`Call`] for the given guild, if one already exists.
@@ -155,13 +151,24 @@ impl Songbird {
     /// This will not join any calls, or cause connection state to change.
     ///
     /// [`Call`]: Call
-    pub fn get_or_insert(&self, guild_id: GuildId) -> Arc<Mutex<Call>> {
+    #[inline]
+    pub fn get_or_insert<G>(&self, guild_id: G) -> Arc<Mutex<Call>>
+    where
+        G: Into<GuildId>,
+    {
+        self._get_or_insert(guild_id.into())
+    }
+
+    fn _get_or_insert(&self, guild_id: GuildId) -> Arc<Mutex<Call>> {
         self.get(guild_id).unwrap_or_else(|| {
             self.calls
                 .entry(guild_id)
                 .or_insert_with(|| {
-                    let info = self.manager_info();
-                    let shard = shard_id(guild_id.0, info.shard_count);
+                    let info = self
+                        .client_data
+                        .read()
+                        .expect("Manager has not been initialised");
+                    let shard = shard_id(guild_id.0.get(), info.shard_count);
                     let shard_handle = self
                         .sharder
                         .get_shard(shard)
@@ -191,13 +198,7 @@ impl Songbird {
         *config = Some(new_config);
     }
 
-    fn manager_info(&self) -> ClientData {
-        let client_data = self.client_data.write();
-
-        *client_data
-    }
-
-    #[cfg(feature = "driver-core")]
+    #[cfg(feature = "driver")]
     /// Connects to a target by retrieving its relevant [`Call`] and
     /// connecting, or creating the handler if required.
     ///
@@ -229,7 +230,7 @@ impl Songbird {
         self._join(guild_id.into(), channel_id.into()).await
     }
 
-    #[cfg(feature = "driver-core")]
+    #[cfg(feature = "driver")]
     async fn _join(
         &self,
         guild_id: GuildId,
@@ -370,7 +371,12 @@ impl Songbird {
                 }
             },
             TwilightEvent::VoiceStateUpdate(v) => {
-                if v.0.user_id.0 != self.client_data.read().user_id.0 {
+                if self
+                    .client_data
+                    .read()
+                    .as_ref()
+                    .map_or(true, |data| v.0.user_id.into_nonzero() != data.user_id.0)
+                {
                     return;
                 }
 
@@ -378,7 +384,7 @@ impl Songbird {
 
                 if let Some(call) = call {
                     let mut handler = call.lock().await;
-                    handler.update_state(v.0.session_id.clone(), v.0.channel_id.map(Into::into));
+                    handler.update_state(v.0.session_id.clone(), v.0.channel_id);
                 }
             },
             _ => {},
@@ -389,7 +395,7 @@ impl Songbird {
 #[cfg(feature = "serenity")]
 #[async_trait]
 impl VoiceGatewayManager for Songbird {
-    async fn initialise(&self, shard_count: u64, user_id: SerenityUser) {
+    async fn initialise(&self, shard_count: u32, user_id: SerenityUser) {
         debug!(
             "Initialising Songbird for Serenity: ID {:?}, {} Shards",
             user_id, shard_count
@@ -398,7 +404,7 @@ impl VoiceGatewayManager for Songbird {
         debug!("Songbird ({:?}) Initialised!", user_id);
     }
 
-    async fn register_shard(&self, shard_id: u64, sender: Sender<InterMessage>) {
+    async fn register_shard(&self, shard_id: u32, sender: Sender<InterMessage>) {
         debug!(
             "Registering Serenity shard handle {} with Songbird",
             shard_id
@@ -407,7 +413,7 @@ impl VoiceGatewayManager for Songbird {
         debug!("Registered shard handle {}.", shard_id);
     }
 
-    async fn deregister_shard(&self, shard_id: u64) {
+    async fn deregister_shard(&self, shard_id: u32) {
         debug!(
             "Deregistering Serenity shard handle {} with Songbird",
             shard_id
@@ -426,21 +432,22 @@ impl VoiceGatewayManager for Songbird {
     }
 
     async fn state_update(&self, guild_id: SerenityGuild, voice_state: &VoiceState) {
-        if voice_state.user_id.0 != self.client_data.read().user_id.0 {
+        if self
+            .client_data
+            .read()
+            .map_or(true, |data| voice_state.user_id.0 != data.user_id.0)
+        {
             return;
         }
 
         if let Some(call) = self.get(guild_id) {
             let mut handler = call.lock().await;
-            handler.update_state(
-                voice_state.session_id.clone(),
-                voice_state.channel_id.map(Into::into),
-            );
+            handler.update_state(voice_state.session_id.clone(), voice_state.channel_id);
         }
     }
 }
 
 #[inline]
-fn shard_id(guild_id: u64, shard_count: u64) -> u64 {
-    (guild_id >> 22) % shard_count
+fn shard_id(guild_id: u64, shard_count: u32) -> u32 {
+    ((guild_id >> 22) % (shard_count as u64)) as u32
 }
