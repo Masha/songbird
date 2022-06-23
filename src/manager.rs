@@ -103,7 +103,7 @@ impl Songbird {
         U: Into<UserId>,
     {
         Self {
-            client_data: PRwLock::new(Some(ClientData {
+            client_data: PRwLock::new(ClientData {
                 shard_count: cluster.config().shard_scheme().total() as u32,
                 user_id: user_id.into(),
             }),
