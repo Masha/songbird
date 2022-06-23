@@ -192,7 +192,7 @@ impl VoiceUpdate for Shard {
             Shard::TwilightCluster(handle, shard_id) => {
                 let channel_id = channel_id.map(|c| c.0).map(From::from);
                 let cmd = TwilightVoiceState::new(guild_id.0, channel_id, self_deaf, self_mute);
-                handle.command(*shard_id as u64, &cmd).await?;
+                handle.command(&cmd).await?;
                 Ok(())
             },
             #[cfg(feature = "twilight")]
