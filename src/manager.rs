@@ -32,6 +32,7 @@ use twilight_model::gateway::event::Event as TwilightEvent;
 #[derive(Clone, Copy, Debug, Default)]
 struct ClientData {
     shard_count: u32,
+    initialised: bool,
     user_id: UserId,
 }
 
