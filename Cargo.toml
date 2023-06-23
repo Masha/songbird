@@ -56,12 +56,12 @@ xsalsa20poly1305 = { features = ["std"], optional = true, version = "0.9" }
 branch = "next"
 default-features = false
 features = ["voice", "gateway"]
-git = "https://github.com/serenity-rs/serenity"
+git = "https://github.com/Masha/serenity"
 optional = true
 
 [dependencies.serenity-voice-model]
 branch = "next"
-git = "https://github.com/serenity-rs/serenity"
+git = "https://github.com/Masha/serenity"
 optional = true
 
 [dev-dependencies]
